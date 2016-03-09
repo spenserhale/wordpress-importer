@@ -63,6 +63,8 @@ class WP_Import extends WP_Importer {
 	var $url_remap = array();
 	var $featured_images = array();
 
+	function WP_Import() { /* nothing */ }
+
 	/**
 	 * Registered callback function for the WordPress Importer
 	 *
@@ -855,10 +857,13 @@ class WP_Import extends WP_Importer {
 			$url = rtrim( $this->base_url, '/' ) . $url;
 
 		$upload = $this->fetch_remote_file( $url, $post );
-		if ( is_wp_error( $upload ) )
+		if ( is_wp_error( $upload ) ) {
 			return $upload;
+		}
 
-		if ( $info = wp_check_filetype( $upload['file'] ) )
+		$info = wp_check_filetype( $upload['file'] );
+
+		if ( $info )
 			$post['post_mime_type'] = $info['type'];
 		else
 			return new WP_Error( 'attachment_processing_error', __('Invalid file type', 'wordpress-importer') );
@@ -887,7 +892,7 @@ class WP_Import extends WP_Importer {
 	 * Attempt to download a remote file attachment
 	 *
 	 * @param string $url URL of item to fetch
-	 * @param array $post Attachment details
+	 * @param WP_Post $post Attachment details
 	 * @return array|WP_Error Local file location details on success, WP_Error otherwise
 	 */
 	function fetch_remote_file( $url, $post ) {
@@ -896,27 +901,35 @@ class WP_Import extends WP_Importer {
 
 		// get placeholder file in the upload dir with a unique, sanitized filename
 		$upload = wp_upload_bits( $file_name, 0, '', $post['upload_date'] );
-		if ( $upload['error'] )
+		if ( $upload['error'] ) {
 			return new WP_Error( 'upload_dir_error', $upload['error'] );
+		}
 
 		// fetch the remote url and write it to the placeholder file
-		$headers = wp_get_http( $url, $upload['file'] );
+		$request = new \WP_Http();
+		$result = $request->request($url);
 
 		// request failed
-		if ( ! $headers ) {
+		if (is_wp_error($result) ) {
 			@unlink( $upload['file'] );
 			return new WP_Error( 'import_file_error', __('Remote server did not respond', 'wordpress-importer') );
 		}
 
 		// make sure the fetch was successful
-		if ( $headers['response'] != '200' ) {
+		if ( 200 !== $result['response']['code'] ) {
 			@unlink( $upload['file'] );
-			return new WP_Error( 'import_file_error', sprintf( __('Remote server returned error response %1$d %2$s', 'wordpress-importer'), esc_html($headers['response']), get_status_header_desc($headers['response']) ) );
+			return new WP_Error( 'import_file_error', sprintf( __('Remote server returned error response %1$d %2$s', 'wordpress-importer'), esc_html($result['response']['code']), get_status_header_desc($result['response']['code']) ) );
 		}
 
-		$filesize = filesize( $upload['file'] );
+		// Save image content to temporary file.
+		if ( false === file_put_contents($upload['file'],$result['body']) ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', __('Could not save image contents', 'wordpress-importer') );
+		}
 
-		if ( isset( $headers['content-length'] ) && $filesize != $headers['content-length'] ) {
+		$filesize = strlen( $result['body'] );
+
+		if ( isset( $result['headers']['content-length'] ) && $filesize != $result['headers']['content-length'] ) {
 			@unlink( $upload['file'] );
 			return new WP_Error( 'import_file_error', __('Remote file is incorrect size', 'wordpress-importer') );
 		}
@@ -936,8 +949,9 @@ class WP_Import extends WP_Importer {
 		$this->url_remap[$url] = $upload['url'];
 		$this->url_remap[$post['guid']] = $upload['url']; // r13735, really needed?
 		// keep track of the destination if the remote url is redirected somewhere else
-		if ( isset($headers['x-final-location']) && $headers['x-final-location'] != $url )
-			$this->url_remap[$headers['x-final-location']] = $upload['url'];
+		if ( isset($result['headers']['x-final-location']) && $result['headers']['x-final-location'] != $url ) {
+			$this->url_remap[ $result['headers']['x-final-location'] ] = $upload['url'];
+		}
 
 		return $upload;
 	}
@@ -1105,7 +1119,7 @@ class WP_Import extends WP_Importer {
 	 * Added to http_request_timeout filter to force timeout at 60 seconds during import
 	 * @return int 60
 	 */
-	function bump_request_timeout( $val ) {
+	function bump_request_timeout() {
 		return 60;
 	}
 
